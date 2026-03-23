@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs"),
+        default=Path("output_samples"),
         help="Directory where rectified images are written.",
     )
     parser.add_argument(
@@ -425,7 +425,7 @@ def process_local_folder(
             break
         image = read_image(image_path)
         rectified = rectify_document(image, config)
-        output_name = f"output_{image_path.stem}.jpg"
+        output_name = f"output{count + 1}.jpg"
         write_output(rectified, output_dir / output_name)
         count += 1
         print(f"[local] processed: {image_path.name} -> {output_name}")
@@ -455,7 +455,7 @@ def process_hf_dataset(
             continue
         image = _to_bgr(raw_image)
         rectified = rectify_document(image, config)
-        output_name = f"output_{idx:05d}.jpg"
+        output_name = f"output{count + 1}.jpg"
         write_output(rectified, output_dir / output_name)
         count += 1
         # Keep a lightweight runtime profile of which strategies are used.
