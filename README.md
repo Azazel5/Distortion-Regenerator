@@ -114,8 +114,3 @@ The script will create an output directory in the current working directory and 
   - text readability near boundaries,
   - failure modes (partial page, heavy shadows, extreme perspective).
 - Track which fallback branch was used for each image to debug robustness.
-
-## Notes
-
-- This is an individual assignment.
-- AI tools can support implementation/debugging/documentation, but all submitted work must be understood and validated by the student.
