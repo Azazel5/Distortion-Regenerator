@@ -27,11 +27,13 @@ class PipelineConfig:
     adaptive_block_size: int = 35
     adaptive_c: int = 10
     morph_kernel: int = 5
-    morph_iterations: int = 1
-    canny_low: int = 50
-    canny_high: int = 150
-    min_contour_area_ratio: float = 0.20
+    morph_iterations: int = 2
+    canny_low: int = 40
+    canny_high: int = 130
+    min_contour_area_ratio: float = 0.08
     polygon_epsilon_ratio: float = 0.02
+    polygon_epsilon_candidates: tuple[float, ...] = (0.012, 0.02, 0.03, 0.045)
+    min_quad_area_ratio: float = 0.06
 
 
 def parse_args() -> argparse.Namespace:
@@ -153,20 +155,61 @@ def order_corners_clockwise(points: np.ndarray) -> np.ndarray:
     return np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
 
 
-def _is_valid_quad(quad: np.ndarray, image_shape: tuple[int, int, int]) -> bool:
+def _is_valid_quad(
+    quad: np.ndarray, image_shape: tuple[int, int, int], min_quad_area_ratio: float
+) -> bool:
     if quad.shape != (4, 2):
         return False
     h, w = image_shape[:2]
     area = cv2.contourArea(quad.reshape(-1, 1, 2))
-    if area < 0.10 * float(h * w):
+    if area < min_quad_area_ratio * float(h * w):
         return False
     return cv2.isContourConvex(quad.reshape(-1, 1, 2).astype(np.int32))
+
+
+def _largest_component_box(
+    mask: np.ndarray, min_area: float, config: PipelineConfig
+) -> np.ndarray | None:
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n_labels <= 1:
+        return None
+
+    best_label = -1
+    best_area = -1
+    for label in range(1, n_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        if area > best_area:
+            best_area = area
+            best_label = label
+
+    if best_label < 0:
+        return None
+
+    comp_mask = np.zeros_like(mask, dtype=np.uint8)
+    comp_mask[labels == best_label] = 255
+    contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    contour = max(contours, key=cv2.contourArea)
+    rect = cv2.minAreaRect(contour)
+    box = cv2.boxPoints(rect).astype(np.float32)
+    box = order_corners_clockwise(box)
+    if _is_valid_quad(box, (*mask.shape, 1), config.min_quad_area_ratio):
+        return box
+    return None
 
 
 def detect_document_corners(
     gray: np.ndarray, binary_mask: np.ndarray, config: PipelineConfig
 ) -> tuple[np.ndarray | None, str]:
-    edges = cv2.Canny(binary_mask, config.canny_low, config.canny_high)
+    edges_binary = cv2.Canny(binary_mask, config.canny_low, config.canny_high)
+    edges_gray = cv2.Canny(gray, config.canny_low, config.canny_high)
+    edges = cv2.bitwise_or(edges_binary, edges_gray)
+    edge_kernel = np.ones((3, 3), dtype=np.uint8)
+    edges = cv2.dilate(edges, edge_kernel, iterations=1)
     contours, _ = cv2.findContours(
         edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -180,13 +223,14 @@ def detect_document_corners(
         if area < min_area:
             continue
         peri = cv2.arcLength(contour, True)
-        epsilon = config.polygon_epsilon_ratio * peri
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-        if len(approx) == 4:
-            quad = approx.reshape(4, 2).astype(np.float32)
-            quad = order_corners_clockwise(quad)
-            if _is_valid_quad(quad, (*gray.shape, 1)):
-                return quad, "contour-quad"
+        for eps_ratio in config.polygon_epsilon_candidates:
+            epsilon = eps_ratio * peri
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            if len(approx) == 4:
+                quad = approx.reshape(4, 2).astype(np.float32)
+                quad = order_corners_clockwise(quad)
+                if _is_valid_quad(quad, (*gray.shape, 1), config.min_quad_area_ratio):
+                    return quad, f"contour-quad-eps-{eps_ratio:.3f}"
 
     # Fallback: use minAreaRect from largest valid-area contour.
     for contour in contours:
@@ -196,10 +240,43 @@ def detect_document_corners(
         rect = cv2.minAreaRect(contour)
         box = cv2.boxPoints(rect).astype(np.float32)
         box = order_corners_clockwise(box)
-        if _is_valid_quad(box, (*gray.shape, 1)):
+        if _is_valid_quad(box, (*gray.shape, 1), config.min_quad_area_ratio):
             return box, "min-area-rect"
 
+    # Secondary fallback: largest connected component on binary masks.
+    comp_quad = _largest_component_box(binary_mask, min_area, config)
+    if comp_quad is not None:
+        return comp_quad, "connected-component"
+
+    inv_binary = cv2.bitwise_not(binary_mask)
+    comp_inv_quad = _largest_component_box(inv_binary, min_area, config)
+    if comp_inv_quad is not None:
+        return comp_inv_quad, "connected-component-inv"
+
     return None, "no-valid-quad"
+
+
+def warp_with_homography(
+    image_bgr: np.ndarray, corners: np.ndarray, config: PipelineConfig
+) -> np.ndarray:
+    destination = np.array(
+        [
+            [0, 0],
+            [config.output_width - 1, 0],
+            [config.output_width - 1, config.output_height - 1],
+            [0, config.output_height - 1],
+        ],
+        dtype=np.float32,
+    )
+    h_matrix = cv2.getPerspectiveTransform(corners.astype(np.float32), destination)
+    warped = cv2.warpPerspective(
+        image_bgr,
+        h_matrix,
+        (config.output_width, config.output_height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return warped
 
 
 def rectify_document(image_bgr: np.ndarray, config: PipelineConfig) -> np.ndarray:
@@ -212,15 +289,24 @@ def rectify_document(image_bgr: np.ndarray, config: PipelineConfig) -> np.ndarra
     foreground_ratio = float(np.count_nonzero(binary_mask)) / float(binary_mask.size)
     corners, corner_method = detect_document_corners(gray, binary_mask, config)
     status = "ok" if corners is not None else "fallback-no-corners"
+    output_mode = "homography-warp" if corners is not None else "resize-fallback"
     print(
         "[pipeline] preprocessing+corners: "
         f"threshold={threshold_method}, foreground_ratio={foreground_ratio:.3f}, "
-        f"corner_method={corner_method}, status={status}"
+        f"corner_method={corner_method}, status={status}, output_mode={output_mode}"
     )
 
-    # Chunk 3 finds/validates document corners.
-    # Chunk 4 will use these corners to compute perspective homography.
-    return cv2.resize(image_bgr, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_CUBIC)
+    if corners is not None:
+        try:
+            return warp_with_homography(image_bgr, corners, config)
+        except cv2.error:
+            print("[pipeline] homography failed, using resize fallback")
+
+    return cv2.resize(
+        image_bgr,
+        (config.output_width, config.output_height),
+        interpolation=cv2.INTER_CUBIC,
+    )
 
 
 def write_output(image_bgr: np.ndarray, output_path: Path) -> None:
