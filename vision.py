@@ -21,6 +21,13 @@ class PipelineConfig:
     output_width: int = OUTPUT_WIDTH
     output_height: int = OUTPUT_HEIGHT
     gaussian_kernel: int = 5
+    bilateral_d: int = 7
+    bilateral_sigma_color: int = 50
+    bilateral_sigma_space: int = 50
+    adaptive_block_size: int = 35
+    adaptive_c: int = 10
+    morph_kernel: int = 5
+    morph_iterations: int = 1
     canny_low: int = 50
     canny_high: int = 150
     min_contour_area_ratio: float = 0.20
@@ -77,13 +84,79 @@ def read_image(path: Path) -> np.ndarray:
     return image
 
 
+def _ensure_odd(value: int) -> int:
+    return value if value % 2 == 1 else value + 1
+
+
+def preprocess_and_binarize(
+    image_bgr: np.ndarray, config: PipelineConfig
+) -> tuple[np.ndarray, np.ndarray, str]:
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+
+    k = _ensure_odd(max(3, config.gaussian_kernel))
+    blurred = cv2.GaussianBlur(gray, (k, k), 0)
+    smooth = cv2.bilateralFilter(
+        blurred,
+        d=config.bilateral_d,
+        sigmaColor=config.bilateral_sigma_color,
+        sigmaSpace=config.bilateral_sigma_space,
+    )
+
+    _, otsu_mask = cv2.threshold(
+        smooth, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    adaptive_block = _ensure_odd(max(3, config.adaptive_block_size))
+    adaptive_mask = cv2.adaptiveThreshold(
+        smooth,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        adaptive_block,
+        config.adaptive_c,
+    )
+
+    # In this dataset the document is brighter than background.
+    # Pick the threshold branch that yields a plausible foreground ratio.
+    otsu_ratio = float(np.count_nonzero(otsu_mask)) / float(otsu_mask.size)
+    method = "otsu"
+    binary = otsu_mask
+    if otsu_ratio < 0.05 or otsu_ratio > 0.80:
+        method = "adaptive"
+        binary = adaptive_mask
+
+    kernel_size = max(3, config.morph_kernel)
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    cleaned = cv2.morphologyEx(
+        binary,
+        cv2.MORPH_CLOSE,
+        kernel,
+        iterations=config.morph_iterations,
+    )
+    cleaned = cv2.morphologyEx(
+        cleaned,
+        cv2.MORPH_OPEN,
+        kernel,
+        iterations=config.morph_iterations,
+    )
+
+    return gray, cleaned, method
+
+
 def rectify_document(image_bgr: np.ndarray, config: PipelineConfig) -> np.ndarray:
     """
     Placeholder for the full CV pipeline.
     Chunk 2+ will add preprocessing, contour extraction, corner ordering,
     and perspective warp.
     """
-    _ = config
+    _, binary_mask, threshold_method = preprocess_and_binarize(image_bgr, config)
+    foreground_ratio = float(np.count_nonzero(binary_mask)) / float(binary_mask.size)
+    print(
+        "[pipeline] preprocessing complete: "
+        f"threshold={threshold_method}, foreground_ratio={foreground_ratio:.3f}"
+    )
+
+    # Chunk 2 intentionally stops at preprocessing/binarization.
+    # Chunk 3 will consume this mask for contour and corner extraction.
     return cv2.resize(image_bgr, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_CUBIC)
 
 

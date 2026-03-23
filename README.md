@@ -93,7 +93,7 @@ Minimum required libraries:
 
 - `opencv-python`
 - `numpy`
-- `Pillow`
+- `pillow`
 
 ## Run
 
