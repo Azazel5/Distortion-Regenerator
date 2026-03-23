@@ -142,21 +142,84 @@ def preprocess_and_binarize(
     return gray, cleaned, method
 
 
+def order_corners_clockwise(points: np.ndarray) -> np.ndarray:
+    pts = points.astype(np.float32)
+    s = pts.sum(axis=1)
+    d = np.diff(pts, axis=1).reshape(-1)
+    top_left = pts[np.argmin(s)]
+    bottom_right = pts[np.argmax(s)]
+    top_right = pts[np.argmin(d)]
+    bottom_left = pts[np.argmax(d)]
+    return np.array([top_left, top_right, bottom_right, bottom_left], dtype=np.float32)
+
+
+def _is_valid_quad(quad: np.ndarray, image_shape: tuple[int, int, int]) -> bool:
+    if quad.shape != (4, 2):
+        return False
+    h, w = image_shape[:2]
+    area = cv2.contourArea(quad.reshape(-1, 1, 2))
+    if area < 0.10 * float(h * w):
+        return False
+    return cv2.isContourConvex(quad.reshape(-1, 1, 2).astype(np.int32))
+
+
+def detect_document_corners(
+    gray: np.ndarray, binary_mask: np.ndarray, config: PipelineConfig
+) -> tuple[np.ndarray | None, str]:
+    edges = cv2.Canny(binary_mask, config.canny_low, config.canny_high)
+    contours, _ = cv2.findContours(
+        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return None, "no-contours"
+
+    min_area = config.min_contour_area_ratio * float(gray.shape[0] * gray.shape[1])
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area:
+            continue
+        peri = cv2.arcLength(contour, True)
+        epsilon = config.polygon_epsilon_ratio * peri
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        if len(approx) == 4:
+            quad = approx.reshape(4, 2).astype(np.float32)
+            quad = order_corners_clockwise(quad)
+            if _is_valid_quad(quad, (*gray.shape, 1)):
+                return quad, "contour-quad"
+
+    # Fallback: use minAreaRect from largest valid-area contour.
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area:
+            continue
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect).astype(np.float32)
+        box = order_corners_clockwise(box)
+        if _is_valid_quad(box, (*gray.shape, 1)):
+            return box, "min-area-rect"
+
+    return None, "no-valid-quad"
+
+
 def rectify_document(image_bgr: np.ndarray, config: PipelineConfig) -> np.ndarray:
     """
     Placeholder for the full CV pipeline.
     Chunk 2+ will add preprocessing, contour extraction, corner ordering,
     and perspective warp.
     """
-    _, binary_mask, threshold_method = preprocess_and_binarize(image_bgr, config)
+    gray, binary_mask, threshold_method = preprocess_and_binarize(image_bgr, config)
     foreground_ratio = float(np.count_nonzero(binary_mask)) / float(binary_mask.size)
+    corners, corner_method = detect_document_corners(gray, binary_mask, config)
+    status = "ok" if corners is not None else "fallback-no-corners"
     print(
-        "[pipeline] preprocessing complete: "
-        f"threshold={threshold_method}, foreground_ratio={foreground_ratio:.3f}"
+        "[pipeline] preprocessing+corners: "
+        f"threshold={threshold_method}, foreground_ratio={foreground_ratio:.3f}, "
+        f"corner_method={corner_method}, status={status}"
     )
 
-    # Chunk 2 intentionally stops at preprocessing/binarization.
-    # Chunk 3 will consume this mask for contour and corner extraction.
+    # Chunk 3 finds/validates document corners.
+    # Chunk 4 will use these corners to compute perspective homography.
     return cv2.resize(image_bgr, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_CUBIC)
 
 
