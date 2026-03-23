@@ -29,28 +29,28 @@ The final deliverable is a single script, `vision.py`, that processes all images
 - Final output resolution must be exactly `550 x 425` pixels (50 DPI for `11" x 8.5"`).
 - Use one fixed parameter set for all images (fully automatic, no per-image manual tuning).
 
-## Planned Pipeline
+## Implemented Pipeline
 
 ### 1) Preprocessing and Binarization
 
 - Convert input image to grayscale.
-- Apply edge-preserving denoising (Gaussian blur first; bilateral as fallback if needed).
-- Segment document from background using thresholding:
-  - Start with Otsu threshold.
-  - Fall back to adaptive threshold when global thresholding fails.
+- Apply denoising with Gaussian blur + bilateral filter.
+- Segment document from background with four threshold candidates:
+  - Otsu, Adaptive Gaussian, Otsu inverted, Adaptive inverted.
+- Select the most plausible binary mask automatically.
 - Apply morphology (close/open) to strengthen page region and remove small artifacts.
 
 ### 2) Edge and Contour Extraction
 
-- Run Canny edge detection on the cleaned binary/grayscale image.
+- Run Canny on both grayscale and binary images, then merge responses.
 - Find contours and rank candidates by area and polygon quality.
-- Prefer the largest plausible quadrilateral contour as the document boundary.
-- Fallback path (if contour approach fails): detect boundary lines with Hough and intersect lines.
+- Use multiple polygon approximation epsilons to recover quadrilaterals robustly.
+- Fallback path: `minAreaRect`, then largest connected component (normal and inverted mask).
 
 ### 3) Corner Localization and Ordering
 
-- Approximate contour with `cv2.approxPolyDP` to obtain four vertices.
-- Refine corners (if necessary) using sub-pixel corner refinement (`cv2.cornerSubPix`) on grayscale data.
+- Approximate contours with `cv2.approxPolyDP` and choose the best-scoring valid quadrilateral.
+- Refine corners with sub-pixel refinement (`cv2.cornerSubPix`) on grayscale data.
 - Enforce consistent order: `[top-left, top-right, bottom-right, bottom-left]`.
 - Validate geometry (convexity, minimum area, reasonable edge lengths) before rectification.
 
@@ -59,20 +59,19 @@ The final deliverable is a single script, `vision.py`, that processes all images
 - Use detected corners as source points.
 - Use canonical page corners for destination points:
   - `[(0,0), (424,0), (424,549), (0,549)]` for width `425`, height `550`.
-- Compute homography with OpenCV (`cv2.getPerspectiveTransform` or robust alternative).
+- Compute homography with `cv2.getPerspectiveTransform`.
 - Warp with `cv2.warpPerspective` to output a color rectified image of shape `550x425`.
 
-## Initial Parameter Plan
-
-These are starting values that will be tuned once we run full-batch tests:
+## Final Parameters (Current)
 
 - Gaussian blur kernel: `5x5`
-- Canny thresholds: `50, 150`
-- Contour area threshold: at least `20%` of image area
-- Polygon epsilon for approximation: `1.5% - 3.0%` of contour perimeter
-- Morphology kernel: `3x3` to `5x5`, 1-2 iterations
-
-Final chosen values and rationale will be updated here after evaluation on representative samples.
+- Bilateral filter: `d=7, sigmaColor=50, sigmaSpace=50`
+- Morphology: kernel `5x5`, iterations `2`
+- Canny thresholds: `40, 130`
+- Minimum contour area ratio: `0.08`
+- Minimum valid quad area ratio: `0.06`
+- Polygon epsilon candidates: `0.012, 0.020, 0.030, 0.045`
+- Sub-pixel corner refinement: window `7`, max iterations `40`, epsilon `0.01`
 
 ## Repository Structure (Target)
 
@@ -99,6 +98,9 @@ Minimum required libraries:
 
 ```bash
 python3 vision.py
+python3 vision.py --limit 20
+python3 vision.py path/to/local/input_folder
+python3 vision.py --input-dir path/to/local/input_folder --output-dir outputs_local
 ```
 
 The script will create an output directory in the current working directory and save one rectified file per input image.
