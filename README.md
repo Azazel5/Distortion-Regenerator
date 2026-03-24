@@ -2,7 +2,7 @@
 
 This project builds an automatic computer vision pipeline that takes distorted photos of a document and outputs rectified, frontal views.
 
-The final deliverable is a single script, `vision.py`, that processes all images in an input folder and writes rectified outputs to a new output folder.
+The final deliverable is a single script, `rectify.py`, that processes all images in an input folder and writes rectified outputs to a new output folder.
 
 ## Objective
 
@@ -24,7 +24,7 @@ The final deliverable is a single script, `vision.py`, that processes all images
 ## Output Requirements
 
 - Script must run from command line:
-  - `python3 vision.py`
+  - `python3 rectify.py <folder_with_inputs>`
 - For each input image, generate one output image in a new output folder.
 - Final output resolution must be exactly `550 x 425` pixels (50 DPI for `11" x 8.5"`).
 - Use one fixed parameter set for all images (fully automatic, no per-image manual tuning).
@@ -35,8 +35,8 @@ The final deliverable is a single script, `vision.py`, that processes all images
 
 - Convert input image to grayscale.
 - Apply denoising with Gaussian blur + bilateral filter.
-- Segment document from background with four threshold candidates:
-  - Otsu, Adaptive Gaussian, Otsu inverted, Adaptive inverted.
+- Segment document from background with automatic threshold selection:
+  - Otsu and Adaptive Gaussian candidates.
 - Select the most plausible binary mask automatically.
 - Apply morphology (close/open) to strengthen page region and remove small artifacts.
 
@@ -45,12 +45,12 @@ The final deliverable is a single script, `vision.py`, that processes all images
 - Run Canny on both grayscale and binary images, then merge responses.
 - Find contours and rank candidates by area and polygon quality.
 - Use multiple polygon approximation epsilons to recover quadrilaterals robustly.
-- Fallback path: `minAreaRect`, then largest connected component (normal and inverted mask).
+- Fallback path: `minAreaRect`, connected-component candidate, and bright-region component candidate.
 
 ### 3) Corner Localization and Ordering
 
 - Approximate contours with `cv2.approxPolyDP` and choose the best-scoring valid quadrilateral.
-- Refine corners with sub-pixel refinement (`cv2.cornerSubPix`) on grayscale data.
+- Optional sub-pixel refinement (`cv2.cornerSubPix`) can be enabled if needed.
 - Enforce consistent order: `[top-left, top-right, bottom-right, bottom-left]`.
 - Validate geometry (convexity, minimum area, reasonable edge lengths) before rectification.
 
@@ -75,7 +75,7 @@ The final deliverable is a single script, `vision.py`, that processes all images
 
 ## Repository Structure (Target)
 
-- `vision.py` - main CLI pipeline script
+- `rectify.py` - main CLI pipeline script (all logic in one file)
 - `output_samples/` - representative rectified outputs (5-10 examples)
 - `README.md` - method, parameters, and usage notes
 - `requirements.txt` - Python dependencies
@@ -97,10 +97,9 @@ Minimum required libraries:
 ## Run
 
 ```bash
-python3 vision.py
-python3 vision.py --limit 20
-python3 vision.py path/to/local/input_folder
-python3 vision.py --input-dir path/to/local/input_folder --output-dir outputs_local
+python3 rectify.py synthetic_data
+python3 rectify.py synthetic_data --limit 20
+python3 rectify.py --input-dir path/to/local/input_folder --output-dir output_samples
 ```
 
 The script will create an output directory in the current working directory and save one rectified file per input image.
